@@ -19,9 +19,10 @@ class DeliveryService:
             dropoff_lng=delivery_data.dropoff_lng
         )
         db.add(db_order)
-        await db.commit()
-        await db.refresh(db_order)
-        
+        # flush() sends the INSERT to Postgres and populates db_order.id (auto-generated PK)
+        # without committing the transaction — lets us create the transition in the same commit.
+        await db.flush()
+
         # Log initial state creation transition
         transition = OrderStateTransition(
             order_id=db_order.id,
@@ -29,8 +30,10 @@ class DeliveryService:
             to_status=OrderStatus.CREATED
         )
         db.add(transition)
+        # Single commit — both the order and the transition persist atomically.
         await db.commit()
-        
+        await db.refresh(db_order)
+
         return db_order
 
     @staticmethod
@@ -91,7 +94,7 @@ class DeliveryService:
             db.add(transition_transit)
             
         # Reset driver status to ONLINE if order is DELIVERED or CANCELLED
-        if (validated_status == OrderStatus.DELIVERED or order.status == OrderStatus.IN_TRANSIT and validated_status == OrderStatus.DELIVERED) or validated_status in [OrderStatus.DELIVERED, OrderStatus.CANCELLED]:
+        if validated_status in [OrderStatus.DELIVERED, OrderStatus.CANCELLED]:
             if order.driver_id:
                 from app.models.driver import Driver, DriverStatus
                 driver_result = await db.execute(select(Driver).where(Driver.id == order.driver_id))

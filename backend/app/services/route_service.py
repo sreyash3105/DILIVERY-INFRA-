@@ -105,8 +105,18 @@ class RouteService:
             "lng": driver_lng
         }
         await redis_client.publish(f"delivery:{order.id}", json.dumps(pub_payload))
-        
-        # Also cache the ETA payload in Redis
+
+        # Cache the full telemetry payload under live_location (used by /live-location endpoint & WS)
         await redis_client.setex(f"delivery:{order.id}:live_location", 300, json.dumps(pub_payload))
+
+        # Cache a dedicated ETA snapshot under its own key (used by /eta endpoint)
+        # Keeping these separate prevents the two endpoints from silently reading each other's data.
+        eta_payload = {
+            "delivery_id": order.id,
+            "eta_minutes": route_data["eta_minutes"],
+            "distance_meters": route_data["distance_meters"],
+            "stage": stage
+        }
+        await redis_client.setex(f"delivery:{order.id}:eta", 300, json.dumps(eta_payload))
 
         return route_data

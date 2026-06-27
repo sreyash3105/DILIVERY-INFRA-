@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+from typing import List, Optional
 from app.db.session import get_db
 from app.models.tenant import Tenant
 from app.models.order import Order, OrderStatus
@@ -16,9 +16,22 @@ router = APIRouter()
 @router.get("/", response_model=List[DeliveryResponse], include_in_schema=False)
 async def list_deliveries(
     db: AsyncSession = Depends(get_db),
-    tenant: Tenant = Depends(get_current_tenant)
+    tenant: Tenant = Depends(get_current_tenant),
+    limit: int = 50,
+    offset: int = 0
 ):
-    result = await db.execute(select(Order).where(Order.tenant_id == tenant.id).order_by(Order.id.desc()))
+    """
+    Returns paginated deliveries for the authenticated tenant.
+    - `limit`: max records to return (default 50, max sensibly capped by caller)
+    - `offset`: number of records to skip (for page-based navigation)
+    """
+    result = await db.execute(
+        select(Order)
+        .where(Order.tenant_id == tenant.id)
+        .order_by(Order.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     orders = result.scalars().all()
     return orders
 
@@ -281,8 +294,8 @@ async def get_delivery_eta(
     from app.db.redis import redis_client
     import json
     
-    # Check cache first
-    cache_key = f"delivery:{delivery_id}:live_location"
+    # Check cache first — use a dedicated ETA key, separate from live_location
+    cache_key = f"delivery:{delivery_id}:eta"
     cached_data = await redis_client.get(cache_key)
     if cached_data:
         try:

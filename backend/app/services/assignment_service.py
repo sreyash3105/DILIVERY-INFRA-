@@ -54,6 +54,12 @@ class AssignmentService:
         await db.commit()
         await db.refresh(order)
 
+        # Broadcast live status update via WebSocket
+        pub_payload = {
+            "delivery_id": order.id,
+            "status": order.status,
+            "driver_id": order.driver_id
+        }
         await redis_client.publish(f"delivery:{order.id}", json.dumps(pub_payload))
 
         # Dispatch event to Celery pipeline
@@ -85,14 +91,15 @@ class AssignmentService:
         )
         excluded_driver_ids = [row for row in attempts_result.scalars().all()]
 
-        # 3. Discover nearby active online drivers using Redis GEORADIUS
-        # Search radius of 10km, ASC sorted
-        candidates = await redis_client.georadius(
-            "drivers:active", 
-            order.pickup_lng, 
-            order.pickup_lat, 
-            10, 
-            unit="km", 
+        # 3. Discover nearby active online drivers using Redis GEOSEARCH
+        # geosearch replaces the deprecated/removed georadius command (Redis 7.2+)
+        # FROMLONLAT + BYRADIUS is the modern equivalent — result shape is identical.
+        candidates = await redis_client.geosearch(
+            "drivers:active",
+            longitude=order.pickup_lng,
+            latitude=order.pickup_lat,
+            radius=10,
+            unit="km",
             withdist=True,
             sort="ASC"
         )

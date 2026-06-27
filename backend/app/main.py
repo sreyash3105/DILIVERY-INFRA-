@@ -6,47 +6,11 @@ from app.core.exceptions import register_exception_handlers
 from app.db.base import Base
 from app.db.session import engine
 from app.core.logging_config import setup_logging
+from app.tasks.cleanup import ghost_driver_cleanup_loop
 
 # Configure structured JSON logging on load
 setup_logging()
 
-async def ghost_driver_cleanup_loop():
-    import asyncio
-    from datetime import datetime, timezone, timedelta
-    from sqlalchemy import select
-    from app.db.session import AsyncSessionLocal
-    from app.models.driver import Driver, DriverStatus
-    from app.db.redis import redis_client
-    import logging
-    
-    logger = logging.getLogger("GhostDriverCleanup")
-    
-    while True:
-        try:
-            await asyncio.sleep(30)
-            async with AsyncSessionLocal() as db:
-                cutoff = datetime.now(timezone.utc) - timedelta(seconds=90)
-                # Find drivers who are ONLINE but haven't sent a ping in 90 seconds
-                stmt = select(Driver).where(
-                    Driver.status == DriverStatus.ONLINE,
-                    Driver.last_seen_at < cutoff
-                )
-                result = await db.execute(stmt)
-                ghosts = result.scalars().all()
-                
-                for driver in ghosts:
-                    logger.info(f"Ghost driver cleanup: Driver #{driver.id} marked OFFLINE due to inactivity.")
-                    driver.status = DriverStatus.OFFLINE
-                    driver.is_available = False
-                    # Remove from Redis Geo Index
-                    await redis_client.zrem("drivers:active", str(driver.id))
-                    
-                if ghosts:
-                    await db.commit()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in ghost_driver_cleanup_loop: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

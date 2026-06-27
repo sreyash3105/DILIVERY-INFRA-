@@ -54,6 +54,11 @@ const Fleet: React.FC = () => {
   const [routeGeometry, setRouteGeometry] = useState<[number, number][] | null>(null);
   const [systemVitals, setSystemVitals] = useState<any>(null);
 
+  // Real service health — populated from the /health endpoint
+  const [healthStatus, setHealthStatus] = useState<{
+    api: string; postgres: string; redis: string; celery: string;
+  } | null>(null);
+
   const fetchDeliveries = async () => {
     try {
       const res = await fetch(`${serverUrl}/deliveries`, {
@@ -78,14 +83,33 @@ const Fleet: React.FC = () => {
     } catch (err) {}
   };
 
+  // Polls the real /health endpoint — no API key required.
+  // Returns { api, postgres, redis, celery } with value "healthy" or "unhealthy: ..."
+  const fetchHealth = async () => {
+    try {
+      const res = await fetch(`${serverUrl}/health`);
+      if (res.ok || res.status === 503) {
+        // 503 is returned when at least one service is unhealthy — still parse the body
+        const data = await res.json();
+        setHealthStatus(data);
+      }
+    } catch (err) {}
+  };
+
   useEffect(() => {
     fetchDeliveries();
     fetchVitals();
+    fetchHealth();
     const interval = setInterval(() => {
       fetchDeliveries();
       fetchVitals();
-    }, 5000);
-    return () => clearInterval(interval);
+    }, 10000); // 10s — halves backend load vs 5s with no visible UX impact
+    // Health check is cheaper to poll less frequently (every 15s)
+    const healthInterval = setInterval(fetchHealth, 15000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(healthInterval);
+    };
   }, [serverUrl, apiKey]);
 
   // Fetch Route Geometry when delivery is selected
@@ -237,11 +261,12 @@ const Fleet: React.FC = () => {
   const selectedDelivery = deliveries.find(d => d.id === selectedDeliveryId);
   const selectedDriver = selectedDelivery?.driver_id ? drivers[selectedDelivery.driver_id] : null;
 
-  // Determine system health check state
-  const isRedisUp = systemVitals ? true : false;
-  const isPostgresUp = deliveries ? true : false;
-  const isCeleryUp = systemVitals && systemVitals.queues ? true : false;
-  const isWsUp = wsStatus === 'connected';
+  // Derive system health from real /health endpoint response.
+  // Falls back to false (red) until the first health response arrives.
+  const isRedisUp    = healthStatus?.redis    === 'healthy';
+  const isPostgresUp = healthStatus?.postgres === 'healthy';
+  const isCeleryUp   = healthStatus?.celery   === 'healthy';
+  const isWsUp       = wsStatus === 'connected';
 
   const queueBacklog = (systemVitals?.queues?.notifications || 0) + (systemVitals?.queues?.analytics || 0);
   const dlqCount = systemVitals?.queues?.dead_letter_queue || 0;
