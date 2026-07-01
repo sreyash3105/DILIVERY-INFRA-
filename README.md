@@ -77,14 +77,19 @@ Orders belong to tenants and are managed via a strict, non-bypassable state mach
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED : Tenant creates order
-    CREATED --> ASSIGNED : Dispatcher assigns driver
+    CREATED --> DRIVER_PENDING : Auto-assignment triggered
     CREATED --> CANCELLED : Tenant cancels
+    DRIVER_PENDING --> ASSIGNED : Driver accepts offer
+    DRIVER_PENDING --> NO_DRIVER_AVAILABLE : No nearby drivers
+    DRIVER_PENDING --> CANCELLED : Tenant cancels
     ASSIGNED --> PICKED_UP : Driver picks up package
+    ASSIGNED --> DRIVER_PENDING : Driver rejects (retry)
     ASSIGNED --> CANCELLED : Tenant/Dispatcher cancels
-    PICKED_UP --> IN_TRANSIT : Courier in route
+    PICKED_UP --> IN_TRANSIT : Auto-advanced immediately
     IN_TRANSIT --> DELIVERED : Courier delivers package
     DELIVERED --> [*]
     CANCELLED --> [*]
+    NO_DRIVER_AVAILABLE --> [*]
 ```
 ### Real-Time Location Ingestion Pipeline
 High-frequency GPS pings from driver apps bypass PostgreSQL and go through a memory stream buffer:
@@ -104,8 +109,8 @@ flowchart TD
 To understand how all systems (FastAPI, Redis, Celery, PostgreSQL, WebSockets) interact at runtime, here is the complete journey of a delivery order from creation to dropoff:
 
 1. **Order Creation (SaaS Ingestion)**: A tenant merchant sends a `POST` request to `/deliveries` containing pickup/dropoff coordinates. FastAPI authenticates their API Key, verifies their rate limits and monthly quota usage in Redis, and commits the order to PostgreSQL in the `CREATED` state.
-2. **Geospatial Courier Matching**: The platform triggers a Redis `GEORADIUS` query searching within a 5km radius of the warehouse. Redis finds the nearest available driver (`ONLINE` and available in the Redis geo index) and assigns an offer, moving the order state to `DRIVER_PENDING`.
-3. **Offer Acceptance**: The driver accepts the offer using the **Simulator Dashboard**. The state validator changes the order to `ASSIGNED` in PostgreSQL, locking the driver to this specific order.
+2. **Geospatial Courier Matching**: The platform triggers a Redis `GEOSEARCH` query (Redis 7.2+ compatible) searching within a 10km radius of the warehouse. Redis finds the nearest available drivers ranked by a scoring function — distance (60%), rating (30%), workload (10%) — and selects the best candidate, moving the order state to `DRIVER_PENDING`.
+3. **Distributed Lock & Offer Acceptance**: The assignment engine acquires a per-driver Redis distributed lock (`SET NX PX 5000`) before offering the order, preventing race conditions across API nodes. The driver has a 30-second window to accept or reject. On acceptance the state advances to `ASSIGNED`.
 4. **GPS Telemetry Streaming**: As the driver drives to pickup the package and heads to destination:
    - The driver app/simulator publishes high-frequency GPS coordinate pings (every 2-4 seconds) to `/drivers/{id}/location`.
    - FastAPI intercepts the ping and routes it directly to two Redis backbones: **Redis Streams** (`stream:locations`) for historical logging, and **Redis Pub/Sub** (`delivery:{id}`) for live broadcasting.
@@ -158,7 +163,7 @@ To understand how all systems (FastAPI, Redis, Celery, PostgreSQL, WebSockets) i
 This project stands out because it prioritizes system design over simple CRUD patterns:
 
 ### Redis GEO Driver Matching
-Instead of doing resource-heavy SQL joins on database coordinates, active drivers are stored in a **Redis Geo-Spatial Index**. When an order is created, the system triggers a `GEORADIUS` query to find the nearest online driver in **< 1.5ms**, using post-selection sorting based on workload.
+Instead of doing resource-heavy SQL joins on database coordinates, active drivers are stored in a **Redis Geo-Spatial Index**. When an order is created, the system triggers a `GEOSEARCH` query (the modern Redis 7.2+ replacement for the deprecated `GEORADIUS`) to find the nearest online drivers in **< 1.5ms**, then applies a weighted scoring function (distance 60%, rating 30%, active workload 10%) to rank candidates.
 
 ### WebSocket Fan-Out Across Multiple API Nodes
 If a customer connects to FastAPI Instance 3 to track an order, and the driver publishes GPS updates to FastAPI Instance 1, standard memory WebSockets fail. We resolved this by integrating a **Redis Pub/Sub shared cluster event backbone**. FastAPI instances subscribe dynamically to `delivery:{id}` channels, fanning out coordinates instantly across the server cluster.
@@ -204,11 +209,13 @@ Ensure you have Docker and Docker Compose installed, then execute:
 
 ```bash
 # 1. Clone the repository
-git clone 
-cd DeliveryInfrastructurePlatformAPI
+git clone <repo-url>
+cd Delivery-Infrastructure-Platform-API-main
 
 # 2. Set up environment variables
 cp .env.example .env
+# Edit .env — at minimum set POSTGRES_PASSWORD
+# Optionally set INTERNAL_API_TOKEN to guard driver registration endpoints
 
 # 3. Generate local SSL Certificates for Nginx TLS
 mkdir -p certs
@@ -217,6 +224,13 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout certs/api.key -out c
 # 4. Spin up all services
 docker compose up -d --build
 ```
+
+On first boot the API will **print your generated API key once** to stdout:
+```
+[STARTUP] *** API Key (copy this now): dep_xxxxxxxxxxxxxxxx ***
+```
+Copy this key — you'll use it as the `X-API-Key` header for all delivery endpoints. The key is unique per deployment and never hardcoded.
+
 Access the application at `https://localhost` (Frontend Dashboard) and `https://localhost/docs` (Swagger API Docs).
 
 ---
@@ -231,13 +245,38 @@ The production platform is designed for a secure **AWS Cloud** configuration:
 
 ---
 
-## 10. Future Improvements
+## 10. Change Record
+
+All code changes applied to this repository after initial build are documented in [`Documents/Sreyash-Baishkhiyar-CRs/`](Documents/Sreyash-Baishkhiyar-CRs/).
+
+| CR | Type | Summary |
+|---|---|---|
+| CR-001 | Bug Fix | Fixed `NameError` crash in `assign_driver()` — `pub_payload` was undefined |
+| CR-002 | Bug Fix | Removed logically redundant compound condition in `update_status()` |
+| CR-003 | Bug Fix | Fixed Redis ETA/live-location cache key collision causing always-miss cache |
+| CR-004 | Performance | Added `limit`/`offset` pagination to `GET /deliveries` |
+| CR-005 | Compatibility | Replaced deprecated `GEORADIUS` with `GEOSEARCH` (Redis 7.2+) |
+| CR-006 | Performance | Eliminated redundant DB commit in `create_delivery()` using `flush()` |
+| CR-007 | Performance | Reduced frontend Fleet dashboard polling from 5s → 10s (50% fewer requests) |
+| CR-008 | Refactor | Extracted `ghost_driver_cleanup_loop` to dedicated `tasks/cleanup.py` |
+| CR-009 | Frontend Fix | Fixed health status badges to use real `/health` API instead of derived state |
+| CR-010 | Security | Replaced hardcoded `test_api_key_123` with `generate_api_key()` on first boot |
+| CR-011 | Security | Added opt-in `X-Internal-Token` guard to driver registration endpoints |
+| CR-012 | Reliability | Fixed `asyncio.get_event_loop()` → `asyncio.run()` in Celery tasks (Python 3.12) |
+| CR-013 | Reliability | Moved `dispatch_event("PICKED_UP")` after `db.commit()` to prevent pre-commit Celery reads |
+| CR-014 | Performance | Offloaded blocking `inspector.ping()` in `/health` to thread executor |
+| CR-015 | Performance | Added `Query(ge=1, le=200)` cap on `GET /deliveries` and paginated analytics endpoint |
+
+---
+
+## 11. Future Improvements
 * **Kubernetes Orchestration**: Transition Docker Compose layers to EKS for auto-scaling FastAPI and Celery worker deployment groups.
 * **Message Broker Upgrade**: Swap Redis Streams for Apache Kafka to support persistent long-term analytics logs.
 * **Connection Pooling**: Add PgBouncer to manage high-volume concurrent PostgreSQL sessions.
 * **Multi-Region Replica Sync**: Set up PostgreSQL read replicas across geographic areas to lower lookup latency.
+* **Ghost Driver Cleanup → Celery Beat**: Move cleanup loop from FastAPI lifespan into Celery Beat so it runs on exactly one node in a multi-replica deployment.
 
 ---
 
-## 11. License
+## 12. License
 Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
