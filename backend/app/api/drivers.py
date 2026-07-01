@@ -7,6 +7,7 @@ from app.schemas.driver import DriverCreate, DriverLocationUpdate, DriverAvailab
 from app.schemas.delivery import DeliveryResponse
 from app.models.order import Order, OrderStatus
 from app.services.driver_service import DriverService
+from app.dependencies.internal_auth import require_internal_token
 
 
 router = APIRouter()
@@ -15,16 +16,20 @@ router = APIRouter()
 @router.post("/", response_model=DriverResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False)
 async def register_driver(
     driver_data: DriverCreate,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_internal_token)
 ):
+    """Register a new driver. Requires X-Internal-Token header when INTERNAL_API_TOKEN env var is set."""
     driver = await DriverService.create_driver(db, driver_data)
     return driver
 
 @router.get("/{driver_id}", response_model=DriverResponse)
 async def get_driver(
     driver_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_internal_token)
 ):
+    """Fetch a driver by ID. Requires X-Internal-Token header when INTERNAL_API_TOKEN env var is set."""
     driver = await DriverService.get_driver(db, driver_id)
     return driver
 

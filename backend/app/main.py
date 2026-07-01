@@ -27,12 +27,15 @@ async def lifespan(app: FastAPI):
     from app.db.session import AsyncSessionLocal
     from app.models.tenant import Tenant
     from app.models.driver import Driver, DriverStatus
+    from app.core.security import generate_api_key
 
     async with AsyncSessionLocal() as db:
         tenant_res = await db.execute(select(Tenant).limit(1))
         if not tenant_res.scalars().first():
-            # Seed default tenant with key 'test_api_key_123'
-            default_tenant = Tenant(name="Default Tenant A", api_key="test_api_key_123")
+            # Generate a unique secure key on first boot — never use a hardcoded key in source.
+            # The generated key is printed once to stdout for the developer to copy.
+            generated_key = generate_api_key()
+            default_tenant = Tenant(name="Default Tenant A", api_key=generated_key)
             db.add(default_tenant)
             
             # Seed default drivers
@@ -40,7 +43,8 @@ async def lifespan(app: FastAPI):
             db.add(Driver(name="Driver 2", phone="+2222222222", status=DriverStatus.OFFLINE, rating=4.8, is_available=True))
             db.add(Driver(name="Driver 3", phone="+3333333333", status=DriverStatus.OFFLINE, rating=4.7, is_available=True))
             await db.commit()
-            print("Auto-seeded default Tenant A (key: 'test_api_key_123') and 3 drivers.")
+            print(f"[STARTUP] Auto-seeded Default Tenant A and 3 drivers.")
+            print(f"[STARTUP] *** API Key (copy this now): {generated_key} ***")
         
     # Start ghost driver cleanup task
     cleanup_task = asyncio.create_task(ghost_driver_cleanup_loop())
@@ -116,13 +120,15 @@ def create_app() -> FastAPI:
         except Exception as e:
             redis_status = f"unhealthy: {str(e)}"
             
-        # Celery check
+        # Celery check — run blocking inspect.ping() in a thread to avoid blocking the event loop
         celery_status = "unhealthy"
         try:
+            import asyncio
             from app.core.celery_app import celery_app
-            # Inspect ping returns a dict mapping worker names to ping responses
             inspector = celery_app.control.inspect(timeout=0.5)
-            pings = inspector.ping()
+            # inspector.ping() is a blocking sync call — offload to thread pool
+            loop = asyncio.get_running_loop()
+            pings = await loop.run_in_executor(None, inspector.ping)
             if pings:
                 celery_status = "healthy"
             else:

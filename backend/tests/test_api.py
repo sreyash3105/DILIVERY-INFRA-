@@ -66,7 +66,9 @@ async def test_delivery_lifecycle(client: AsyncClient, test_tenant):
         headers=headers
     )
     assert update_response.status_code == 200
-    assert update_response.json()["status"] == OrderStatus.PICKED_UP.value
+    # The server auto-advances PICKED_UP -> IN_TRANSIT immediately,
+    # so the returned status is always IN_TRANSIT.
+    assert update_response.json()["status"] == OrderStatus.IN_TRANSIT.value
 
 
 @pytest.mark.asyncio

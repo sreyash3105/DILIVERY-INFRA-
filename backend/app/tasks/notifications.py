@@ -15,13 +15,12 @@ email_circuit_breaker = CircuitBreaker(name="EmailProvider", failure_threshold=3
 push_circuit_breaker = CircuitBreaker(name="PushProvider", failure_threshold=3, recovery_timeout=15.0)
 
 def run_async(coro):
-    """Utility to run asynchronous coroutines in synchronous Celery task context."""
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Run an async coroutine from a sync Celery task context.
+
+    Uses asyncio.run() which creates a fresh event loop per call — the correct
+    pattern for Celery workers where no event loop is running (Python 3.10+).
+    """
+    return asyncio.run(coro)
 
 async def _db_log_notification(event_id: str, order_id: int, tenant_id: int, channel: str, event_type: str, status: str, error_message: str = None):
     """Inserts a notification record into the PostgreSQL database."""

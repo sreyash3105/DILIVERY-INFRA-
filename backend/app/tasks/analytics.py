@@ -9,12 +9,12 @@ from app.core.geo import calculate_haversine_distance
 logger = logging.getLogger("AnalyticsTask")
 
 def run_async(coro):
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Run an async coroutine from a sync Celery task context.
+
+    Uses asyncio.run() which creates a fresh event loop per call — the correct
+    pattern for Celery workers where no event loop is running (Python 3.10+).
+    """
+    return asyncio.run(coro)
 
 async def _process_delivery_analytics(order_id: int):
     """

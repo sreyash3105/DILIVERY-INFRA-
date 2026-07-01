@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from typing import List, Dict, Any
@@ -89,15 +89,19 @@ async def get_driver_analytics(
 @router.get("/deliveries")
 async def get_deliveries_analytics(
     db: AsyncSession = Depends(get_db),
-    tenant: Tenant = Depends(get_current_tenant)
+    tenant: Tenant = Depends(get_current_tenant),
+    limit: int = Query(default=50, ge=1, le=200, description="Max records to return"),
+    offset: int = Query(default=0, ge=0, description="Number of records to skip")
 ):
-    """Returns detailed analytics stats for all completed deliveries."""
+    """Returns paginated analytics stats for completed deliveries."""
     # Query TripAnalytics joined on Order to restrict by Tenant
     result = await db.execute(
         select(TripAnalytics, Order)
         .join(Order, TripAnalytics.order_id == Order.id)
         .where(Order.tenant_id == tenant.id)
         .order_by(TripAnalytics.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     
     analytics_list = []

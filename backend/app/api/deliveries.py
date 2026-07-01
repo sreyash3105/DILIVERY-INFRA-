@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
@@ -17,8 +17,8 @@ router = APIRouter()
 async def list_deliveries(
     db: AsyncSession = Depends(get_db),
     tenant: Tenant = Depends(get_current_tenant),
-    limit: int = 50,
-    offset: int = 0
+    limit: int = Query(default=50, ge=1, le=200, description="Max records to return (1–200)"),
+    offset: int = Query(default=0, ge=0, description="Number of records to skip")
 ):
     """
     Returns paginated deliveries for the authenticated tenant.

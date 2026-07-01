@@ -82,8 +82,6 @@ class DeliveryService:
 
         # Auto-transition PICKED_UP -> IN_TRANSIT
         if validated_status == OrderStatus.PICKED_UP:
-            from app.core.events import dispatch_event
-            dispatch_event("PICKED_UP", order.id, order.tenant_id)
             old_status = OrderStatus.PICKED_UP
             order.status = OrderStatus.IN_TRANSIT
             transition_transit = OrderStateTransition(
@@ -107,7 +105,7 @@ class DeliveryService:
                         from app.db.redis import redis_client
                         await redis_client.geoadd("drivers:active", (driver.current_lng, driver.current_lat, str(driver.id)))
         
-        # 5. Commit
+        # 5. Commit all changes atomically
         await db.commit()
         await db.refresh(order)
 
@@ -121,8 +119,12 @@ class DeliveryService:
         }
         await redis_client.publish(f"delivery:{order.id}", json.dumps(pub_payload))
 
-        # 7. Dispatch events to Celery pipeline
+        # 7. Dispatch events to Celery pipeline after commit so workers read correct DB state
         from app.core.events import dispatch_event
+        # If the original request was PICKED_UP, fire that event explicitly before the
+        # auto-advanced IN_TRANSIT event so both notifications are delivered in order.
+        if validated_status == OrderStatus.PICKED_UP:
+            dispatch_event("PICKED_UP", order.id, order.tenant_id)
         dispatch_event(order.status.value, order.id, order.tenant_id)
 
         return order
